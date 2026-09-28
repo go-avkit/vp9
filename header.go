@@ -75,77 +75,47 @@ func ParseHeader(frame []byte) (Header, error) {
 	r := &bitReader{data: frame}
 	var h Header
 
-	marker, err := r.literal(2)
-	if err != nil {
-		return h, err
+	marker := r.literal(2)
+	// ⛔ Checked before the comparison, and again after the sync code below, for
+	// one reason: a reader that has run out returns zero, and a zero compared
+	// against the marker would answer "not VP9" for a frame that was merely cut.
+	// Those are different complaints and a caller acts differently on each.
+	if r.err != nil {
+		return h, r.err
 	}
 	if marker != frameMarker {
 		return h, fmt.Errorf("%w: frame marker is %d, not %d", ErrNotVP9, marker, frameMarker)
 	}
 	// The profile arrives low bit first, and a value above 2 spends one more bit
 	// that the format reserves.
-	low, err := r.bit()
-	if err != nil {
-		return h, err
-	}
-	high, err := r.bit()
-	if err != nil {
-		return h, err
-	}
+	low, high := r.bit(), r.bit()
 	h.Profile = uint8(low | high<<1)
-	if h.Profile > 2 {
-		reserved, err := r.bit()
-		if err != nil {
-			return h, err
-		}
-		if reserved != 0 {
-			return h, fmt.Errorf("%w: after profile %d", ErrReserved, h.Profile)
-		}
+	if h.Profile > 2 && r.bit() != 0 {
+		return h, fmt.Errorf("%w: after profile %d", ErrReserved, h.Profile)
 	}
 
-	existing, err := r.bit()
-	if err != nil {
-		return h, err
-	}
-	if existing == 1 {
+	if r.bit() == 1 {
 		// A frame that only repeats one already decoded states which, and
 		// nothing else: there is no description to read here, and a caller
 		// after one has to look at another frame.
 		h.ShowExisting, h.Show = true, true
-		idx, err := r.literal(3)
-		if err != nil {
-			return h, err
-		}
-		h.ExistingFrame = uint8(idx)
-		return h, nil
+		h.ExistingFrame = uint8(r.literal(3))
+		return h, r.err
 	}
 
-	kind, err := r.bit()
-	if err != nil {
-		return h, err
-	}
-	h.Key = kind == 0
-	show, err := r.bit()
-	if err != nil {
-		return h, err
-	}
-	h.Show = show == 1
-	resilient, err := r.bit()
-	if err != nil {
-		return h, err
-	}
-	h.ErrorResilient = resilient == 1
-
+	h.Key = r.bit() == 0
+	h.Show = r.flag()
+	h.ErrorResilient = r.flag()
 	if !h.Key {
 		// An inter frame's description comes from the frames it refers to, and
 		// reading those means keeping state this does not yet keep. What it
 		// stated so far is still worth handing back.
-		return h, nil
+		return h, r.err
 	}
 
-	sync, err := r.literal(24)
-	if err != nil {
-		return h, err
+	sync := r.literal(24)
+	if r.err != nil {
+		return h, r.err
 	}
 	if sync != syncCode {
 		return h, fmt.Errorf("%w: %#06x, not %#06x", ErrSyncCode, sync, syncCode)
@@ -153,10 +123,8 @@ func ParseHeader(frame []byte) (Header, error) {
 	if err := h.readColour(r); err != nil {
 		return h, err
 	}
-	if err := h.readSize(r); err != nil {
-		return h, err
-	}
-	return h, nil
+	h.readSize(r)
+	return h, r.err
 }
 
 // readColour reads the bit depth, colour space, range and subsampling.
@@ -167,23 +135,19 @@ func ParseHeader(frame []byte) (Header, error) {
 // profile-0 frame, which is most of them, and would still produce plausible
 // numbers -- so the profile is checked against the colour space and the
 // contradiction is an error rather than a silent reinterpretation.
+//
+// The contradictions are judged on values that a cut stream reads as zero, and
+// zero contradicts nothing: the refusals here cannot fire on a truncation, and
+// the reader's own error is what answers that.
 func (h *Header) readColour(r *bitReader) error {
 	h.BitDepth = 8
 	if h.Profile >= 2 {
-		deep, err := r.bit()
-		if err != nil {
-			return err
-		}
 		h.BitDepth = 10
-		if deep == 1 {
+		if r.flag() {
 			h.BitDepth = 12
 		}
 	}
-	space, err := r.literal(3)
-	if err != nil {
-		return err
-	}
-	h.ColorSpace = uint8(space)
+	h.ColorSpace = uint8(r.literal(3))
 	highProfile := h.Profile == 1 || h.Profile == 3
 
 	if h.ColorSpace == csSRGB {
@@ -192,44 +156,23 @@ func (h *Header) readColour(r *bitReader) error {
 		if !highProfile {
 			return fmt.Errorf("%w: 4:4:4 needs profile 1 or 3, not %d", ErrProfile, h.Profile)
 		}
-		reserved, err := r.bit()
-		if err != nil {
-			return err
-		}
-		if reserved != 0 {
+		if r.bit() != 0 {
 			return fmt.Errorf("%w: after an sRGB colour space", ErrReserved)
 		}
 		return nil
 	}
 
-	full, err := r.bit()
-	if err != nil {
-		return err
-	}
-	h.FullRange = full == 1
+	h.FullRange = r.flag()
 	if !highProfile {
 		// Profiles 0 and 2 are 4:2:0 and state nothing.
 		h.SubsamplingX, h.SubsamplingY = 1, 1
 		return nil
 	}
-	x, err := r.bit()
-	if err != nil {
-		return err
-	}
-	y, err := r.bit()
-	if err != nil {
-		return err
-
-	}
-	h.SubsamplingX, h.SubsamplingY = uint8(x), uint8(y)
-	if x == 1 && y == 1 {
+	h.SubsamplingX, h.SubsamplingY = uint8(r.bit()), uint8(r.bit())
+	if h.SubsamplingX == 1 && h.SubsamplingY == 1 {
 		return fmt.Errorf("%w: 4:2:0 cannot be stated in profile %d", ErrProfile, h.Profile)
 	}
-	reserved, err := r.bit()
-	if err != nil {
-		return err
-	}
-	if reserved != 0 {
+	if r.bit() != 0 {
 		return fmt.Errorf("%w: after a subsampled colour space", ErrReserved)
 	}
 	return nil
@@ -239,34 +182,13 @@ func (h *Header) readColour(r *bitReader) error {
 // it is meant to be displayed at.
 //
 // Both are stated one less than they are, so a zero width is not expressible and
-// no check for one is needed.
-func (h *Header) readSize(r *bitReader) error {
-	w, err := r.literal(16)
-	if err != nil {
-		return err
-	}
-	ht, err := r.literal(16)
-	if err != nil {
-		return err
-	}
-	h.Width, h.Height = uint16(w)+1, uint16(ht)+1
+// no check for one is needed. A truncation is the reader's to report, so this
+// returns nothing.
+func (h *Header) readSize(r *bitReader) {
+	h.Width, h.Height = uint16(r.literal(16))+1, uint16(r.literal(16))+1
 	h.RenderWidth, h.RenderHeight = h.Width, h.Height
-
-	different, err := r.bit()
-	if err != nil {
-		return err
+	if !r.flag() {
+		return
 	}
-	if different == 0 {
-		return nil
-	}
-	rw, err := r.literal(16)
-	if err != nil {
-		return err
-	}
-	rh, err := r.literal(16)
-	if err != nil {
-		return err
-	}
-	h.RenderWidth, h.RenderHeight = uint16(rw)+1, uint16(rh)+1
-	return nil
+	h.RenderWidth, h.RenderHeight = uint16(r.literal(16))+1, uint16(r.literal(16))+1
 }
