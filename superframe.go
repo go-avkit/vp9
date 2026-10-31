@@ -58,16 +58,22 @@ func SplitSuperframe(packet []byte) ([][]byte, error) {
 		return whole, nil
 	}
 
-	sizes := make([]int, frames)
+	// ⛔ Summed as the unsigned values they are. Converted to int first, a size
+	// of 2^31 or more is negative where int is 32 bits wide, so sizes could sum
+	// to the payload through a negative one -- P+1 and then 0xFFFFFFFF -- and
+	// the frame after it was sliced backwards: a panic on every 32-bit target.
+	// Eight sizes of at most 2^32-1 cannot overflow 64 bits, and once they
+	// account for the payload exactly, each one fits an int.
+	sizes := make([]uint32, frames)
 	at := len(packet) - index + 1
-	var total int
+	var total uint64
 	for i := range sizes {
-		sizes[i] = int(littleEndian(packet[at : at+sizeBytes]))
+		sizes[i] = littleEndian(packet[at : at+sizeBytes])
 		at += sizeBytes
-		total += sizes[i]
+		total += uint64(sizes[i])
 	}
 	payload := len(packet) - index
-	if total != payload {
+	if total != uint64(payload) {
 		// Past this point the pattern, both marker bytes and the length all
 		// agreed, so this is an index rather than a coincidence -- and it does
 		// not describe the packet it sits in. Handing the packet back whole would
@@ -78,10 +84,11 @@ func SplitSuperframe(packet []byte) ([][]byte, error) {
 
 	out := make([][]byte, 0, frames)
 	off := 0
-	for _, n := range sizes {
-		if n == 0 {
+	for _, size := range sizes {
+		if size == 0 {
 			return nil, fmt.Errorf("%w: frame %d of %d is empty", ErrSuperframe, len(out)+1, frames)
 		}
+		n := int(size)
 		out = append(out, packet[off:off+n])
 		off += n
 	}
