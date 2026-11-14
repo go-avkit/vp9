@@ -1,5 +1,11 @@
 # vp9
 
+[![ci](https://github.com/go-avkit/vp9/actions/workflows/ci.yml/badge.svg)](https://github.com/go-avkit/vp9/actions/workflows/ci.yml)
+[![Go Reference](https://pkg.go.dev/badge/github.com/go-avkit/vp9.svg)](https://pkg.go.dev/github.com/go-avkit/vp9)
+[![License: BSD-3-Clause](https://img.shields.io/badge/License-BSD--3--Clause-blue.svg)](LICENSE)
+
+Part of [go-avkit](https://go-avkit.github.io): [documentation](https://go-avkit.github.io/docs/).
+
 Pure-Go (CGO=0) reader for the parts of a VP9 bitstream that are **plain bit
 fields**: the uncompressed frame header, and the superframe index that packs
 several frames into one sample.
